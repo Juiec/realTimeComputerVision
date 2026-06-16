@@ -2,11 +2,11 @@ import cv2
 import numpy as np
 from ultralytics import YOLO
 
-model = YOLO("./yoloe-26n-seg-pf.pt")
+model = YOLO("./model/yolo26n.pt")
 
 pose_model = None
 try:
-    pose_model = YOLO("./yolo26n-pose.pt")
+    pose_model = YOLO("./model/yolo26n-pose.pt")
 except Exception as exc:
     print("Pose model not loaded:", exc)
 
@@ -36,6 +36,18 @@ if mp_hands is not None:
         min_tracking_confidence=0.5,
     )
 """
+def is_hand_raised(xy):
+    wrist = xy[10]   # right wrist
+    shoulder = xy[6] # right shoulder
+
+    return wrist[1] < shoulder[1]
+
+def is_pointing(xy):
+    wrist = xy[10]
+    elbow = xy[8]
+
+    return abs(wrist[0] - elbow[0]) > 50
+
 MODE_OBJECTS = "objects"
 MODE_POSE = "pose"
 MODE_HANDS = "hands"
@@ -106,6 +118,26 @@ def detect_objects(frame, mode=MODE_BOTH):
     if mode in (MODE_POSE, MODE_BOTH, MODE_ALL) and pose_model is not None:
         pose_results = pose_model(frame)[0]
         frame = draw_pose(frame, pose_results.keypoints)
+        
+        # ✅ Process keypoints for gestures
+        if pose_results.keypoints is not None and pose_results.keypoints.xy is not None:
+            xy_all = pose_results.keypoints.xy.cpu().numpy()
+
+            for xy in xy_all:  # loop over each person
+
+                # ✅ Hand raised
+                if is_hand_raised(xy):
+                    cv2.putText(frame, "HAND RAISED", (50, 120),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0,255,0), 3)
+
+                # ✅ Pointing
+                if is_pointing(xy):
+                    cv2.putText(frame, "POINTING", (50, 170),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0,255,255), 3)
+
+                    # 🎯 Reaction: highlight pointing position
+                    x, y = int(xy[10][0]), int(xy[10][1])  # right wrist
+                    cv2.circle(frame, (x, y), 15, (0, 255, 255), -1)
 
     """
     if mode in (MODE_HANDS, MODE_ALL) and hands is not None:
@@ -139,7 +171,7 @@ def main():
         key = cv2.waitKey(1) & 0xFF
         if key == ord("q"):
             break
-        if key == ord("o"):
+        elif key == ord("o"):
             mode = MODE_OBJECTS
         elif key == ord("p"):
             mode = MODE_POSE
