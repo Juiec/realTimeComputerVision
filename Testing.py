@@ -2,7 +2,6 @@ import cv2
 import numpy as np
 from ultralytics import YOLO
 
-# Load YOLOv8 object model
 model = YOLO("./yoloe-26n-seg-pf.pt")
 
 pose_model = None
@@ -11,6 +10,15 @@ try:
 except Exception as exc:
     print("Pose model not loaded:", exc)
 
+"""
+mp_hands = None
+try:
+    import mediapipe as mp
+    mp_hands = mp.solutions.hands
+    mp_draw = mp.solutions.drawing_utils
+except Exception as exc:
+    print("Hand model not loaded:", exc)
+"""
 POSE_CONNECTIONS = [
     (0, 1), (0, 2), (1, 3), (2, 4),
     (0, 5), (0, 6), (5, 7), (7, 9),
@@ -19,139 +27,133 @@ POSE_CONNECTIONS = [
     (13, 15), (12, 14), (14, 16),
 ]
 
+"""
+if mp_hands is not None:
+
+    hands = mp_hands.Hands(
+        max_num_hands=2,
+        min_detection_confidence=0.7,
+        min_tracking_confidence=0.5,
+    )
+"""
+MODE_OBJECTS = "objects"
+MODE_POSE = "pose"
+MODE_HANDS = "hands"
+MODE_BOTH = "both"
+MODE_ALL = "all"
+MODE_NONE = "none"
+
+def to_numpy(x):
+    if hasattr(x, "cpu"):
+        x = x.cpu()
+    if hasattr(x, "numpy"):
+        return x.numpy()
+    return np.asarray(x)
 
 def draw_pose(frame, keypoints, conf_threshold=0.3):
     if keypoints is None:
-        return
-
-    def to_numpy(x):
-        if x is None:
-            return None
-        if hasattr(x, "cpu"):
-            x = x.cpu()
-        if hasattr(x, "numpy"):
-            x = x.numpy()
-        return np.asarray(x)
+        return frame
 
     if hasattr(keypoints, "xy"):
         xy = to_numpy(keypoints.xy)
-        conf = to_numpy(getattr(keypoints, "conf", None))
+        conf = to_numpy(getattr(keypoints, "conf", np.ones(xy.shape[:2], dtype=np.float32)))
     else:
-        keypoints = to_numpy(keypoints)
-        if keypoints.ndim == 3:
-            # batch of poses: [batch, num_keypoints, 2 or 3]
-            for person in keypoints:
-                draw_pose(frame, person, conf_threshold)
-            return
-        xy = keypoints[:, :2] if keypoints.ndim == 2 and keypoints.shape[1] >= 2 else keypoints
-        conf = keypoints[:, 2] if keypoints.ndim == 2 and keypoints.shape[1] >= 3 else None
+        arr = to_numpy(keypoints)
+        if arr.ndim == 3:
+            xy = arr[..., :2]
+            conf = arr[..., 2] if arr.shape[-1] >= 3 else np.ones(arr.shape[:2], dtype=np.float32)
+        elif arr.ndim == 2:
+            xy = arr[:, :2][None, ...]
+            conf = arr[:, 2][None, ...] if arr.shape[-1] >= 3 else np.ones((1, arr.shape[0]))
+        else:
+            return frame
 
-    if xy is None or xy.ndim < 2:
-        return
+    for i in range(xy.shape[0]):
+        pose = xy[i]
+        score = conf[i]
+        for j, (x, y) in enumerate(pose):
+            if score[j] < conf_threshold:
+                continue
+            cv2.circle(frame, (int(x), int(y)), 3, (0, 120, 0), -1)
 
-    if xy.ndim == 3:
-        for i in range(xy.shape[0]):
-            sub_xy = xy[i]
-            sub_conf = conf[i] if conf is not None and conf.ndim == 2 else conf
-            draw_pose(frame, type("K", (), {"xy": sub_xy, "conf": sub_conf})(), conf_threshold)
-        return
+        for a, b in POSE_CONNECTIONS:
+            if score[a] < conf_threshold or score[b] < conf_threshold:
+                continue
+            pt1 = tuple(map(int, pose[a]))
+            pt2 = tuple(map(int, pose[b]))
+            cv2.line(frame, pt1, pt2, (7, 81, 142), 2)
 
-    if conf is None:
-        conf = np.ones((xy.shape[0],), dtype=np.float32)
-    elif conf.ndim == 2 and conf.shape[0] == 1:
-        conf = conf[0]
+    return frame
 
-    if xy.shape[0] != conf.shape[0]:
-        return
-
-    for point, score in zip(xy, conf):
-        x, y = int(point[0]), int(point[1])
-        if score < conf_threshold:
-            continue
-        cv2.circle(frame, (x, y), 3, (0, 0, 255), -1)
-
-    for a, b in POSE_CONNECTIONS:
-        if a < len(xy) and b < len(xy):
-            xa, ya = int(xy[a][0]), int(xy[a][1])
-            xb, yb = int(xy[b][0]), int(xy[b][1])
-            conf_a = float(conf[a])
-            conf_b = float(conf[b])
-            if conf_a >= conf_threshold and conf_b >= conf_threshold:
-                cv2.line(frame, (xa, ya), (xb, yb), (255, 0, 0), 2)
-
-
-MODE_OBJECTS = "objects"
-MODE_POSE = "pose"
-MODE_BOTH = "both"
-MODE_NONE = "none"
-
+"""
+def draw_hands(frame, results):
+    if results is None or not getattr(results, "multi_hand_landmarks", None):
+        return frame
+    for hand_landmarks in results.multi_hand_landmarks:
+        mp_draw.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
+    return frame
+"""
 def detect_objects(frame, mode=MODE_BOTH):
-    detected_objects = []
 
-    if mode in (MODE_POSE, MODE_BOTH) and pose_model is not None:
-        pose_results = pose_model(frame)
-        for pr in pose_results:
-            if hasattr(pr, "keypoints") and pr.keypoints is not None:
-                draw_pose(frame, pr.keypoints)
+    if mode in (MODE_OBJECTS, MODE_BOTH, MODE_ALL):
+        results = model(frame)[0]
+        for box in results.boxes:
+            x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
+            label = results.names[int(box.cls[0])] + f" {box.conf[0]:.2f}"
+            cv2.rectangle(frame, (x1, y1), (x2, y2), (219, 95, 41), 2)
+            cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (219, 95, 41), 2)
 
-    if mode in (MODE_OBJECTS, MODE_BOTH):
-        results = model(frame)
-        for r in results:
-            for box in r.boxes:
-                class_id = int(box.cls[0])  # Get class ID
-                confidence = box.conf[0].item()  # Confidence score
+    if mode in (MODE_POSE, MODE_BOTH, MODE_ALL) and pose_model is not None:
+        pose_results = pose_model(frame)[0]
+        frame = draw_pose(frame, pose_results.keypoints)
 
-                if confidence > 0.5:
-                    label = model.names[class_id]
-                    confidence_percent = confidence * 100
-                    clabel = f"{label} {confidence_percent:.2f}%"
-                    detected_objects.append(clabel)
-
-                    # Draw bounding box
-                    x1, y1, x2, y2 = map(int, box.xyxy[0])
-                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                    cv2.putText(frame, clabel, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-
-    return frame, detected_objects
-
+    """
+    if mode in (MODE_HANDS, MODE_ALL) and hands is not None:
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        hand_results = hands.process(rgb)
+        frame = draw_hands(frame, hand_results)
+    """
+    return frame
 
 def main():
-    cap = cv2.VideoCapture(0)  # Open webcam
+    cap = cv2.VideoCapture(0)
+    """
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+    """
+
     mode = MODE_BOTH
+    print("Press o=objects, p=pose, h=hands, b=both, a=all, n=none, q=quit")
 
     while True:
         ret, frame = cap.read()
-
         if not ret:
             break
-        frame = cv2.flip(frame, 1)  # Mirror the frame
 
-        frame, detected_objects = detect_objects(frame, mode)
-        cv2.putText(frame, f"Mode: {mode}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
-        cv2.imshow("AI Vision", frame)
-
-        if detected_objects and mode in (MODE_OBJECTS, MODE_BOTH):
-            print("Detected objects:", detected_objects)
+        frame = cv2.flip(frame, 1)
+        frame = detect_objects(frame, mode)
+        cv2.putText(frame, f"Mode: {mode}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
+        cv2.putText(frame, f"Press[Q] to quit", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
+        cv2.imshow("Oh Hello There.", frame)
 
         key = cv2.waitKey(1) & 0xFF
-        if key == ord('q'):
+        if key == ord("q"):
             break
-        elif key == ord('n'):
-            mode = MODE_NONE
-            print("Switched to no detection mode")
-        elif key == ord('o'):
+        if key == ord("o"):
             mode = MODE_OBJECTS
-            print("Switched to object detection mode")
-        elif key == ord('p'):
+        elif key == ord("p"):
             mode = MODE_POSE
-            print("Switched to pose detection mode")
-        elif key == ord('b'):
+        elif key == ord("h"):
+            mode = MODE_HANDS
+        elif key == ord("b"):
             mode = MODE_BOTH
-            print("Switched to both object and pose mode")
+        elif key == ord("a"):
+            mode = MODE_ALL
+        elif key == ord("n"):
+            mode = MODE_NONE
 
     cap.release()
     cv2.destroyAllWindows()
-
 
 if __name__ == "__main__":
     main()
